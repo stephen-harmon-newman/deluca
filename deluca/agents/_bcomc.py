@@ -252,7 +252,6 @@ class BCOMC(Agent):
         g = self.grad_mul * self.d_action * self.d_out * self.H**2 * cost * jnp.tensordot(self.A_inv, self.eps, ((0,4,5,6), (0,1,2,3)))
         
         if self.t >= self.H:
-            # self.M = jnp.reshape(minimize(self.min_func, jnp.ravel(jnp.zeros(self.M.shape)), method="BFGS").x, self.M.shape)
             self.M = jnp.reshape(newton_step_minimum_specific(self.jac_min_func,
                                                               self.hes_min_func, 
                                                               self.old_g_sum, 
@@ -273,13 +272,6 @@ class BCOMC(Agent):
 
         self.eps = roll_and_set_last(self.eps, eps)
         self.tilde_M = self.M + jnp.reshape(jnp.linalg.solve(jnp.reshape(A_inv, (np.prod(self.M.shape),)*2), jnp.ravel(eps)), self.M.shape)
-        # self.M + jnp.tensordot(jnp.reshape(jlinalg.inv(jnp.reshape(A_inv, (np.prod(self.M.shape),)*2)), self.M.shape*2), eps, ((3,4,5),(0,1,2)))
-        if self.t % 100 == 0:
-            print("Step " + str(self.t) + ":")
-            print("g:", g)
-            print("M:", self.M)
-            print("~M:", self.tilde_M)
-            print("y_nat:", self.y_nat)
     def get_action(self, state: jnp.ndarray) -> jnp.ndarray:
         """
         Description: get action from state.
