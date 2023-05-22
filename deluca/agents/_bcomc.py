@@ -52,41 +52,50 @@ def truncated_markov_operator(A, B, C, H):
         G = G.at[i].set(C @ jnp.linalg.matrix_power(A, i) @ B)
     return G
 
-@partial(jax.jit, static_argnames=['jac', 'hes'])
-def newton_iterate(x, jac, hes):
-    jac_val = jac(x)
-    hes_val = hes(x)
-    hes_inv_jac_val = jlinalg.inv(hes_val) @ jac_val
-    return (x - hes_inv_jac_val/1.1)
-    #lam = jnp.sum(hes_inv_jac_val * jac_val)**.5
-    #return jax.lax.cond(lam < 1, lambda x: (x-hes_inv_jac_val), lambda x: (x - hes_inv_jac_val/(1+lam)), x)
+# @partial(jax.jit, static_argnames=['jac', 'hes'])
+# def newton_iterate(x, jac, hes):
+#     jac_val = jac(x)
+#     hes_val = hes(x)
+#     hes_inv_jac_val = jlinalg.inv(hes_val) @ jac_val
+#     return (x - hes_inv_jac_val/1.1)
+#     #lam = jnp.sum(hes_inv_jac_val * jac_val)**.5
+#     #return jax.lax.cond(lam < 1, lambda x: (x-hes_inv_jac_val), lambda x: (x - hes_inv_jac_val/(1+lam)), x)
+
+# @partial(jax.jit, static_argnames=['jac', 'hes'])
+# def newton_step_minimum(jac, hes, start_point):
+#     """
+#     Description: fast minimizer for self-concordant functions
+#     """
+#     # x = start_point
+#     # while jnp.linalg.norm(jac(x))>1e-8:
+#     #     x = newton_iterate(x, jac, hes)
+#     #     print("iter:", x)
+#     # print(hash(jac), hash(hes))
+#     x = jax.lax.while_loop(lambda x: jnp.linalg.norm(jac(x))>1e-6, lambda x: newton_iterate(x, jac, hes), start_point)
+#     return x
+
 
 @partial(jax.jit, static_argnames=['jac', 'hes'])
-def newton_step_minimum(jac, hes, start_point):
-    """
-    Description: fast minimizer for self-concordant functions
-    """
-    # x = start_point
-    # while jnp.linalg.norm(jac(x))>1e-8:
-    #     x = newton_iterate(x, jac, hes)
-    #     print("iter:", x)
-    # print(hash(jac), hash(hes))
-    x = jax.lax.while_loop(lambda x: jnp.linalg.norm(jac(x))>1e-6, lambda x: newton_iterate(x, jac, hes), start_point)
-    return x
-
-
-@partial(jax.jit, static_argnames=['jac', 'hes'])
-def newton_iterate_specific(x, jac, hes, old_g_sum, old_M_sum):
-    jac_val = jac(x, old_g_sum, old_M_sum)
-    hes_val = hes(x)
+def newton_iterate_specific(x, jac, hes, old_g_sum, old_M_sum, t):
+    jac_val = jac(x, old_g_sum, old_M_sum, t)
+    hes_val = hes(x, t)
     hes_inv_jac_val = jlinalg.solve(hes_val, jac_val)
     lam = jnp.dot(hes_inv_jac_val, jac_val) ** .5
-    return (x-hes_inv_jac_val/ (2+2*lam), jnp.sum(jnp.square(hes_inv_jac_val))/(1+lam))
+    return (x-hes_inv_jac_val/ (1+lam), lam)
     
 
 @partial(jax.jit, static_argnames=['jac', 'hes'])
-def newton_step_minimum_specific(jac, hes, old_g_sum, old_M_sum, start_point):
-    x = jax.lax.while_loop(lambda x: x[1] >= 1e-10, lambda x: newton_iterate_specific(x[0], jac, hes, old_g_sum, old_M_sum), (start_point, 1e10))
+def newton_step_minimum_specific(jac, hes, old_g_sum, old_M_sum, t, start_point):
+    # x = (start_point, 1e10)
+    # niter = 0
+    # while x[1] >= 1e-6:
+    #     x = newton_iterate_specific(x[0], jac, hes, old_g_sum, old_M_sum, t)
+    #     print("Iter!", x[1])
+    #     print(x[0])
+    #     niter += 1
+    #     if niter > 30:
+    #         raise ArithmeticError
+    x = jax.lax.while_loop(lambda x: x[1] >= 1e-10, lambda x: newton_iterate_specific(x[0], jac, hes, old_g_sum, old_M_sum, t), (start_point, 1e10))
     return x[0]
     
 
@@ -162,9 +171,9 @@ class BCOMC(Agent):
             return -jnp.log(1 - jnp.sum(jnp.square(flat_M)) / (self.R**2))
 
         # Compiling this in place is really bad, since it ends up baking all of the constants in place.
-        def min_func(flat_M):
+        def min_func(flat_M):  # This is a rewrite of the function minimized to obtain M in terms of the sums of historic Ms and gs.
             return (self.eta * jnp.sum(jnp.ravel(self.old_g_sum) * flat_M)
-                    + self.eta * (self.sigma/2.0) * jnp.sum(jnp.square(flat_M - jnp.ravel(self.old_M_sum)))
+                    + self.eta * (self.sigma/2.0) * (self.t-self.H+1) * jnp.sum(jnp.square(flat_M - jnp.ravel(self.old_M_sum/(self.t-self.H+1))))
                     + regularizer(flat_M)
                    )
         
@@ -175,15 +184,15 @@ class BCOMC(Agent):
         self.hes_regularizer = jax.jit(jax.hessian(regularizer))
 
         @jax.jit
-        def jac_min_func(flat_M, old_g_sum, old_M_sum):
+        def jac_min_func(flat_M, old_g_sum, old_M_sum, t):  # Manually computed
             return (self.eta * jnp.ravel(old_g_sum)
-                    + self.eta * self.sigma * jnp.sum(flat_M - jnp.ravel(old_M_sum))
-                    + self.jac_regularizer(flat_M)
+                    + self.eta * self.sigma * (t-self.H+1) * (flat_M - jnp.ravel(old_M_sum/(t-self.H+1)))
+                    + jax.jit(self.jac_regularizer)(flat_M)
                     )
         
         @jax.jit
-        def hes_min_func(flat_M):
-            return self.eta * self.sigma * jnp.identity(flat_M.shape[0]) + self.hes_regularizer(flat_M)
+        def hes_min_func(flat_M, t):  # Likewise
+            return self.eta * self.sigma * (t-self.H+1) * jnp.identity(flat_M.shape[0]) + jax.jit(self.hes_regularizer)(flat_M)
         
 
         self.jac_min_func = jac_min_func
@@ -241,12 +250,18 @@ class BCOMC(Agent):
         self.old_g_sum = self.old_g_sum + self.g_buffer[0]
         self.old_M_sum = self.old_M_sum + self.M_buffer[0]
         g = self.grad_mul * self.d_action * self.d_out * self.H**2 * cost * jnp.tensordot(self.A_inv, self.eps, ((0,4,5,6), (0,1,2,3)))
+        
         if self.t >= self.H:
             # self.M = jnp.reshape(minimize(self.min_func, jnp.ravel(jnp.zeros(self.M.shape)), method="BFGS").x, self.M.shape)
-            self.M = jnp.reshape(newton_step_minimum_specific(self.jac_min_func, self.hes_min_func, self.old_g_sum, self.old_M_sum, jnp.ravel(jnp.zeros(self.M.shape))), (self.H, self.d_action, self.d_out))
+            self.M = jnp.reshape(newton_step_minimum_specific(self.jac_min_func,
+                                                              self.hes_min_func, 
+                                                              self.old_g_sum, 
+                                                              self.old_M_sum, 
+                                                              self.t, 
+                                                              jnp.ravel(self.M)), 
+                                 (self.H, self.d_action, self.d_out))
         else:
             self.M = jnp.zeros((self.H, self.d_action, self.d_out))
-        
         self.g_buffer = roll_and_set_last(self.g_buffer, g)
         self.M_buffer = roll_and_set_last(self.M_buffer, self.M)
         hessian_sum = self.hes_regularizer(jnp.ravel(self.M)) + self.eta * self.sigma * (self.t+1) * jnp.identity(np.prod(self.M.shape))
@@ -255,10 +270,12 @@ class BCOMC(Agent):
         self.A_inv = roll_and_set_last(self.A_inv, A_inv)
 
         eps = generate_uniform_seeded(self.M.shape, temp_key)
+
         self.eps = roll_and_set_last(self.eps, eps)
         self.tilde_M = self.M + jnp.reshape(jnp.linalg.solve(jnp.reshape(A_inv, (np.prod(self.M.shape),)*2), jnp.ravel(eps)), self.M.shape)
         # self.M + jnp.tensordot(jnp.reshape(jlinalg.inv(jnp.reshape(A_inv, (np.prod(self.M.shape),)*2)), self.M.shape*2), eps, ((3,4,5),(0,1,2)))
         if self.t % 100 == 0:
+            print("Step " + str(self.t) + ":")
             print("g:", g)
             print("M:", self.M)
             print("~M:", self.tilde_M)
@@ -279,3 +296,5 @@ class BCOMC(Agent):
         # print("YNAT:", self.y_nat)
         # print("Control:", new_u)
         return new_u[:, jnp.newaxis]
+
+# TODO: either add K to ours or remove it from hers for even comparison. Probably the former.
