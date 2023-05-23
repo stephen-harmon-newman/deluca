@@ -24,6 +24,6 @@ from deluca.agents._deep import Deep
 from deluca.agents.core import Agent
 from deluca.agents._ilc import ILC
 from deluca.agents._igpc import IGPC
-from deluca.agents._bcomc import BCOMC
+from deluca.agents._ebpc import EBPC
 
-__all__ = ["LQR", "PID", "BPC", "GPC", "ILQR", "Hinf", "Zero", "DRC", "Adaptive", "Deep", "Agent", "ILC", "IGPC", "BCOMC"]
+__all__ = ["LQR", "PID", "BPC", "GPC", "ILQR", "Hinf", "Zero", "DRC", "Adaptive", "Deep", "Agent", "ILC", "IGPC", "EBPC"]

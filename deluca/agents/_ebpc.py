@@ -25,6 +25,7 @@ from jax import grad
 from jax import jit
 from jax.scipy.optimize import minimize
 jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_debug_nans", True)
 import scipy.optimize
 
 
@@ -81,42 +82,52 @@ def newton_iterate_specific(x, jac, hes, old_g_sum, old_M_sum, t):
     hes_val = hes(x, t)
     hes_inv_jac_val = jlinalg.solve(hes_val, jac_val)
     lam = jnp.dot(hes_inv_jac_val, jac_val) ** .5
-    return (x-hes_inv_jac_val/ (1+lam), lam)
+    return (x-hes_inv_jac_val/(1.1+lam), jnp.linalg.norm(hes_inv_jac_val/(1.1+lam)))
     
 
 @partial(jax.jit, static_argnames=['jac', 'hes'])
 def newton_step_minimum_specific(jac, hes, old_g_sum, old_M_sum, t, start_point):
     # x = (start_point, 1e10)
     # niter = 0
-    # while x[1] >= 1e-6:
+    # while x[1] >= 1e-7:
     #     x = newton_iterate_specific(x[0], jac, hes, old_g_sum, old_M_sum, t)
     #     print("Iter!", x[1])
     #     print(x[0])
     #     niter += 1
     #     if niter > 30:
     #         raise ArithmeticError
-    x = jax.lax.while_loop(lambda x: x[1] >= 1e-10, lambda x: newton_iterate_specific(x[0], jac, hes, old_g_sum, old_M_sum, t), (start_point, 1e10))
+    x = jax.lax.while_loop(lambda x: x[1] >= 1e-7, lambda x: newton_iterate_specific(x[0], jac, hes, old_g_sum, old_M_sum, t), (start_point, 1e10))
     return x[0]
     
 
+@jit
+def stable_sqrtm(mat):  # Presumes all entries strictly positive
+    min_elt = jnp.min(jnp.abs(mat))
+    min_elt = jax.lax.cond(min_elt > 1e-10, lambda x: x, lambda x: 1.0, min_elt)
+    return jlinalg.sqrtm(mat / min_elt) * (min_elt ** 0.5)
 
 
 
-class BCOMC(Agent):
+class EBPC(Agent):
     def __init__(
         self,
         A: jnp.ndarray = None,  # Linear system matrices. Will override Markov operator if set.
         B: jnp.ndarray = None,
-        C: jnp.ndarray = None,
+        C: jnp.ndarray = None,  # If none, assumes full observation
+        Q: jnp.ndarray = None,  # Cost matrices
+        R: jnp.ndarray = None,  # Cost matrices
         T: int = 10000,  # Time horizon
         H: int = 5,  # Memory duration
         cost_bound: Real = 1,  # Maximum cost
         sigma: Real = 0.01,  # Strong-convexity guarantee
         beta: Real = 100,  # Smoothness guarantee
-        R: Real = 100,  # Radius of controller set
+        rad: Real = 100,  # Radius of controller set
         L: Real = 10,  # Lipschitz constant
         eta_mul: Real = 1,  # Used for practical tuning  
-        grad_mul: Real = 1,  # used for practical tuning  
+        grad_mul: Real = 1,  # used for practical tuning
+        use_K: bool = False,
+        K: jnp.ndarray = None,
+
     ) -> None:
         """
         Description: Initialize the dynamics of the model.
@@ -125,6 +136,14 @@ class BCOMC(Agent):
         self.A = A
         self.B = B
         self.C = C
+        if self.C is None:
+            self.C = jnp.identity(self.A.shape[0])
+        else:
+            if use_K:
+                raise AssertionError("Requires C=None if use_K is specified!")
+        self.use_K = use_K
+        if use_K:
+            self.K = K if K is not None else LQR(self.A, self.B, Q, R).K
         self.d_out, self.d_state, self.d_action = self.C.shape[0], self.C.shape[1], self.B.shape[1]  # State & Action Dimensions
         self.H = H
         def eta_min_func(eta):
@@ -132,11 +151,11 @@ class BCOMC(Agent):
                      + (16*np.sqrt(eta*T)*self.d_state*L*cost_bound*H**3)/np.sqrt(sigma)
                      + 32*eta*self.d_state**2*cost_bound**2*H**7*T
                      + (2*np.log(T))/eta
-                     + (16*np.sqrt(eta*T)*beta*self.d_state*cost_bound*(2*R)*H**4)/np.sqrt(sigma))
+                     + (16*np.sqrt(eta*T)*beta*self.d_state*cost_bound*(2*rad)*H**4)/np.sqrt(sigma))
         self.eta = eta_mul * scipy.optimize.minimize(eta_min_func, 1/np.sqrt(T), bounds=((1e-8/T, None),)).x[0]
         print("eta:", self.eta)
         self.t = 0  # Time Counter (for decaying learning rate)
-        self.R = R
+        self.rad = rad
 
         self.M = jnp.zeros((H, self.d_action, self.d_out))  # We don't need history for this
         self.tilde_M = jnp.zeros((H, self.d_action, self.d_out))  # Or this
@@ -168,7 +187,7 @@ class BCOMC(Agent):
 
         @jax.jit
         def regularizer(flat_M):
-            return -jnp.log(1 - jnp.sum(jnp.square(flat_M)) / (self.R**2))
+            return -jnp.log(1 - jnp.sum(jnp.square(flat_M)) / (self.rad**2))
 
         # Compiling this in place is really bad, since it ends up baking all of the constants in place.
         def min_func(flat_M):  # This is a rewrite of the function minimized to obtain M in terms of the sums of historic Ms and gs.
@@ -261,10 +280,13 @@ class BCOMC(Agent):
                                  (self.H, self.d_action, self.d_out))
         else:
             self.M = jnp.zeros((self.H, self.d_action, self.d_out))
+        if jnp.sum(jnp.square(self.M)) / (self.rad**2) > 1-1e-6:  # make sure we stay inside the boundary -- floating-point causes problems here
+            self.M = self.M * (1-1e-6) / (jnp.sum(jnp.square(self.M)) / (self.rad**2))**.5
         self.g_buffer = roll_and_set_last(self.g_buffer, g)
         self.M_buffer = roll_and_set_last(self.M_buffer, self.M)
         hessian_sum = self.hes_regularizer(jnp.ravel(self.M)) + self.eta * self.sigma * (self.t+1) * jnp.identity(np.prod(self.M.shape))
-        A_inv = jnp.reshape(jnp.real(jlinalg.sqrtm(hessian_sum)), self.M.shape + self.M.shape)
+
+        A_inv = jnp.reshape(jnp.real(stable_sqrtm(hessian_sum)), self.M.shape + self.M.shape)
 
         self.A_inv = roll_and_set_last(self.A_inv, A_inv)
 
@@ -283,6 +305,8 @@ class BCOMC(Agent):
             jnp.ndarray
         """
         new_u = jnp.tensordot(self.tilde_M, self.y_nat[::-1], ((0, 2,), (0, 1,)))  # Todo: check this and other tensordots.
+        if self.use_K:
+            new_u = new_u - (self.K @ state)[:, 0]
         self.u = roll_and_set_last(self.u, new_u)
         self.x_unnat = self.A.dot(self.x_unnat) + self.B.dot(new_u)
         # print("YNAT:", self.y_nat)

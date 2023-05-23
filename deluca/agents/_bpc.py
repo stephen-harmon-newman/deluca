@@ -43,7 +43,8 @@ class BPC(Agent):
         H: int = 5,
         lr_scale: Real = 0.005,
         decay: bool = False,
-        delta: Real = 0.01
+        delta: Real = 0.01,
+        use_K: bool = False,  # Determines whether we augment with a stabilizing controller. 
     ) -> None:
         """
         Description: Initialize the dynamics of the model.
@@ -93,6 +94,8 @@ class BPC(Agent):
 
         self.grad = grad
 
+        self.use_K = use_K
+
     def __call__(self,
                 state: jnp.ndarray,
                 cost: Real
@@ -128,7 +131,7 @@ class BPC(Agent):
             None
         """
         noise = state - self.A @ self.state - self.B @ action
-        self.noise_history = jax.ops.index_update(self.noise_history, 0, noise)
+        self.noise_history = self.noise_history.at[0].set(noise)
         self.noise_history = jnp.roll(self.noise_history, -1, axis=0)
 
         lr = self.lr_scale
@@ -137,8 +140,7 @@ class BPC(Agent):
         delta_M = self.grad(self.M, self.noise_history, cost)
         self.M -= lr * delta_M
 
-        self.eps = jax.ops.index_update(self.eps, 0, \
-                        generate_uniform((self.H, self.d_action, self.d_state)))
+        self.eps[0] = generate_uniform((self.H, self.d_action, self.d_state))
         self.eps = np.roll(self.eps, -1, axis = 0)
 
         self.M += self.delta * self.eps[-1]
@@ -158,4 +160,4 @@ class BPC(Agent):
         Returns:
             jnp.ndarray
         """
-        return -self.K @ state + jnp.tensordot(self.M, self.noise_history, axes=([0, 2], [0, 1]))
+        return (-self.K @ state if self.use_K else 0) + jnp.tensordot(self.M, self.noise_history, axes=([0, 2], [0, 1]))
