@@ -78,7 +78,7 @@ class BPC(Agent):
         # TODO: need to address problem of LQR with jax.lax.scan
         self.K = K if K is not None else LQR(self.A, self.B, Q, R).K
 
-        self.M = self.delta * generate_uniform((H, self.d_action, self.d_state))
+        self.tilde_M = self.M = self.delta * generate_uniform((H, self.d_action, self.d_state))
 
         # Past H noises ordered increasing in time
         self.noise_history = jnp.zeros((H, self.d_state, 1))
@@ -139,11 +139,11 @@ class BPC(Agent):
 
         delta_M = self.grad(self.M, self.noise_history, cost)
         self.M -= lr * delta_M
+        self.M /= max(jnp.linalg.norm(self.M), 1+1e-6)
 
         self.eps[0] = generate_uniform((self.H, self.d_action, self.d_state))
         self.eps = np.roll(self.eps, -1, axis = 0)
-
-        self.M += self.delta * self.eps[-1]
+        self.tilde_M = self.M + self.delta * self.eps[-1]
 
         # update state
         self.state = state
@@ -160,4 +160,4 @@ class BPC(Agent):
         Returns:
             jnp.ndarray
         """
-        return (-self.K @ state if self.use_K else 0) + jnp.tensordot(self.M, self.noise_history, axes=([0, 2], [0, 1]))
+        return (-self.K @ state if self.use_K else 0) + jnp.tensordot(self.tilde_M, self.noise_history, axes=([0, 2], [0, 1]))
