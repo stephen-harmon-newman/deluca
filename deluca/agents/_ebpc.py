@@ -27,6 +27,7 @@ from jax.scipy.optimize import minimize
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_debug_nans", True)
 import scipy.optimize
+import scipy.linalg
 
 
 from deluca.agents._lqr import LQR
@@ -100,11 +101,11 @@ def newton_step_minimum_specific(jac, hes, old_g_sum, old_M_sum, t, start_point)
     return x[0]
     
 
-@jit
-def stable_sqrtm(mat):  # Presumes all entries strictly positive
-    min_elt = jnp.min(jnp.abs(mat))
-    min_elt = jax.lax.cond(min_elt > 1e-10, lambda x: x, lambda x: 1.0, min_elt)
-    return jlinalg.sqrtm(mat / min_elt) * (min_elt ** 0.5)
+def stable_sqrtm(mat):  # Needed since jax sqrt appears to have issues with poor conditioning. NOTE: results in substantial slowdown. Any way to go back to JAX?
+    return jnp.array(scipy.linalg.sqrtm(np.array(mat)))
+    # min_elt = jnp.min(jnp.abs(mat))
+    # min_elt = jax.lax.cond(min_elt > 1e-10, lambda x: x, lambda x: 1.0, min_elt)
+    # return jlinalg.sqrtm(mat / min_elt) * (min_elt ** 0.5)
 
 
 
@@ -127,6 +128,7 @@ class EBPC(Agent):
         grad_mul: Real = 1,  # used for practical tuning
         use_K: bool = False,
         K: jnp.ndarray = None,
+        random_key: jax.random.PRNGKey = None,
 
     ) -> None:
         """
@@ -217,7 +219,9 @@ class EBPC(Agent):
         self.jac_min_func = jac_min_func
         self.hes_min_func = hes_min_func
 
-        self.key = jax.random.PRNGKey(42)
+        self.key = random_key
+        if self.key is None:
+            self.key = jax.random.PRNGKey(42)
 
         self.grad_mul = grad_mul
 
@@ -312,5 +316,3 @@ class EBPC(Agent):
         # print("YNAT:", self.y_nat)
         # print("Control:", new_u)
         return new_u[:, jnp.newaxis]
-
-# TODO: either add K to ours or remove it from hers for even comparison. Probably the former.

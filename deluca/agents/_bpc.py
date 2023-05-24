@@ -31,6 +31,9 @@ def generate_uniform(shape, norm=1.00):
             v = np.array(v)
             return v
 
+def onetwo_norm(tens):
+     return np.sum(np.linalg.norm(tens, axis=(1, 2)))
+
 class BPC(Agent):
     def __init__(
         self,
@@ -139,7 +142,8 @@ class BPC(Agent):
 
         delta_M = self.grad(self.M, self.noise_history, cost)
         self.M -= lr * delta_M
-        self.M /= max(jnp.linalg.norm(self.M), 1+1e-6)
+        if onetwo_norm(self.M) > (1-2*self.delta):
+            self.M *= .8 / onetwo_norm(self.M)
 
         self.eps[0] = generate_uniform((self.H, self.d_action, self.d_state))
         self.eps = np.roll(self.eps, -1, axis = 0)
@@ -161,3 +165,5 @@ class BPC(Agent):
             jnp.ndarray
         """
         return (-self.K @ state if self.use_K else 0) + jnp.tensordot(self.tilde_M, self.noise_history, axes=([0, 2], [0, 1]))
+
+
