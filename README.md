@@ -1,6 +1,10 @@
 # `deluca`
 
-Performant, differentiable reinforcement learning
+This is a fork of deluca which contains experimental code for the paper "Optimal Rates for Bandit Nonstochastic Control." This repository was used as the base to facilitate comparison with the work of Gradu et al.
+
+
+
+Performant, differentiable reinforcement learning.
 
 ## Notes
 1. This is pre-alpha software and is undergoing a number of core changes. Updates to follow.
